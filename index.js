@@ -1,305 +1,284 @@
-const { Telegraf, Markup } = require('telegraf');
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const UserAgent = require('user-agents');
-const fs = require('fs');
-const express = require('express');
+import asyncio
+import os
+import random
+import re
+from aiohttp import web
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 
-puppeteer.use(StealthPlugin());
+# --- الإعدادات الأساسية ---
+BOT_TOKEN = os.environ.get('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
+MY_TELEGRAM_ID = int(os.environ.get('MY_TELEGRAM_ID', 8435344041))
+PORT = int(os.environ.get('PORT', 3000))
 
-// --- الإعدادات الأساسية ---
-const BOT_TOKEN = process.env.BOT_TOKEN || '8690835074:AAGcbDTPCqP5ixRVf9LC73EX4NGNnf_6_S4';
-const MY_TELEGRAM_ID = parseInt(process.env.MY_TELEGRAM_ID) || 8435344041; 
+bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+dp = Dispatcher()
 
-const bot = new Telegraf(BOT_TOKEN);
-const userState = {};
+# --- إدارة حالات المحادثة (FSM) ---
+class FormSteps(StatesGroup):
+    get_manual_code = State()
+    get_phone = State()
+    get_email = State()
+    get_message = State()
+    confirm = State()
 
-// --- خادم الويب لاستضافة Render ---
-const app = express();
-app.get('/', (req, res) => res.send('🟢 لوحة تحكم VIP تعمل بنجاح! السيرفر نشط.'));
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🌐 الخادم الوهمي يعمل على المنفذ ${PORT}`));
+# --- الواجهات والأزرار ---
+main_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text='🚀 إرسال طلب دعم جديد'), KeyboardButton(text='📊 حالة السيرفر')],
+        [KeyboardButton(text='❌ إلغاء العملية')]
+    ],
+    resize_keyboard=True
+)
 
-// --- الواجهات الجذابة ---
-const mainMenu = Markup.keyboard([
-    ['🚀 إرسال طلب دعم جديد', '📊 حالة السيرفر'],
-    ['❌ إلغاء العملية']
-]).resize();
+country_menu = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [InlineKeyboardButton(text='🇾🇪 اليمن (+967)', callback_data='set_code_+967'), InlineKeyboardButton(text='🇸🇦 السعودية (+966)', callback_data='set_code_+966')],
+        [InlineKeyboardButton(text='🇪🇬 مصر (+20)', callback_data='set_code_+20'), InlineKeyboardButton(text='🌐 رمز آخر (يدوي)', callback_data='set_code_manual')],
+        [InlineKeyboardButton(text='🚫 إلغاء', callback_data='cancel_task')]
+    ]
+)
 
-const countryMenu = Markup.inlineKeyboard([
-    [Markup.button.callback('🇾🇪 اليمن (+967)', 'set_code_+967'), Markup.button.callback('🇸🇦 السعودية (+966)', 'set_code_+966')],
-    [Markup.button.callback('🇪🇬 مصر (+20)', 'set_code_+20'), Markup.button.callback('🌐 رمز آخر (يدوي)', 'set_code_manual')],
-    [Markup.button.callback('🚫 إلغاء', 'cancel_task')]
-]);
+# --- فلتر حماية: السماح للمدير فقط ---
+@dp.message.outer_middleware()
+async def auth_middleware(handler, event, data):
+    if event.from_user.id != MY_TELEGRAM_ID:
+        return
+    return await handler(event, data)
 
-// --- وظائف مساعدة ---
-const randomDelay = (min = 40, max = 90) => Math.floor(Math.random() * (max - min + 1) + min);
-const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+@dp.callback_query.outer_middleware()
+async def auth_callback_middleware(handler, event, data):
+    if event.from_user.id != MY_TELEGRAM_ID:
+        return
+    return await handler(event, data)
 
-let globalBrowser;
+# --- أوامر البوت الأساسية ---
+@dp.message(CommandStart())
+async def start_cmd(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "<b>مرحباً بك سيدي في لوحة التحكم VIP 👑</b>\n\n<i>النظام مبني على Python وجاهز للعمل على Render.</i>",
+        reply_markup=main_menu
+    )
 
-// --- الإدارة الذكية للمتصفح ---
-async function getBrowser() {
-    if (globalBrowser && globalBrowser.connected) {
-        return globalBrowser;
-    }
-    console.log("🔄 جاري تهيئة محرك المتصفح...");
-    try {
-        globalBrowser = await puppeteer.launch({
-            headless: true,
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
-            args: [
-                '--no-sandbox', 
-                '--disable-setuid-sandbox', 
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process',
-                '--disable-extensions'
-            ]
-        });
-        console.log("✅ المتصفح الاحترافي جاهز للعمل.");
-        return globalBrowser;
-    } catch (e) {
-        console.error("❌ خطأ في تشغيل المتصفح:", e);
-        throw e;
-    }
-}
+@dp.message(F.text == '📊 حالة السيرفر')
+async def server_status(message: Message):
+    await message.answer("<b>📊 حالة النظام:</b>\nالمتصفح: مستعد للعمل 🟢\nالخادم (Render): متصل 🟢")
 
-// حماية البوت (السماح للمدير فقط)
-bot.use(async (ctx, next) => {
-    if (ctx.from && ctx.from.id === MY_TELEGRAM_ID) {
-        try {
-            await next();
-        } catch (err) {
-            console.error("❌ حدث خطأ في معالجة الطلب:", err);
-        }
-    }
-});
+@dp.message(F.text == '❌ إلغاء العملية')
+async def cancel_process(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("✅ تم تنظيف الجلسة والعودة للقائمة الرئيسية.", reply_markup=main_menu)
 
-bot.start(async (ctx) => {
-    delete userState[ctx.from.id];
-    await ctx.replyWithHTML(
-        `<b>مرحباً بك سيدي في لوحة التحكم VIP 👑</b>\n\n` +
-        `<i>النظام جاهز ومؤمن بالكامل للعمل على Render.</i>`, 
-        mainMenu
-    );
-});
+@dp.message(F.text == '🚀 إرسال طلب دعم جديد')
+async def new_request(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("<b>🌍 الخطوة 1:</b> اختر الدولة المستهدفة:", reply_markup=country_menu)
 
-bot.hears('📊 حالة السيرفر', async (ctx) => {
-    const isConnected = globalBrowser && globalBrowser.connected;
-    const status = isConnected ? "🟢 متصل (Render Online)" : "🔴 المحرك في وضع الاستعداد";
-    await ctx.replyWithHTML(`<b>📊 حالة النظام:</b>\nالمتصفح: ${status}\nالخادم: 🟢 متصل`);
-});
+# --- استقبال رمز الدولة ---
+@dp.callback_query(F.data.startswith('set_code_'))
+async def process_country(callback: CallbackQuery, state: FSMContext):
+    code = callback.data.replace('set_code_', '')
+    if code == 'manual':
+        await state.set_state(FormSteps.get_manual_code)
+        await callback.message.edit_text("📝 أرسل رمز الدولة فقط (مثال: +967):")
+    else:
+        await state.update_data(country_code=code)
+        await state.set_state(FormSteps.get_phone)
+        await callback.message.edit_text(f"✅ تم اختيار الرمز ({code})\n\n<b>الآن أرسل رقم الهاتف المحلي فقط (بدون رمز الدولة):</b>")
+    await callback.answer()
 
-bot.hears('❌ إلغاء العملية', async (ctx) => {
-    delete userState[ctx.from.id];
-    await ctx.reply('✅ تم تنظيف الجلسة والعودة للقائمة الرئيسية.', mainMenu);
-});
+@dp.callback_query(F.data == 'cancel_task')
+async def cancel_inline(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("❌ تم إلغاء العملية بنجاح.")
+    await callback.answer()
 
-bot.hears('🚀 إرسال طلب دعم جديد', async (ctx) => {
-    userState[ctx.from.id] = { step: 'select_country' };
-    await ctx.replyWithHTML('<b>🌍 الخطوة 1:</b> اختر الدولة المستهدفة:', countryMenu);
-});
+# --- استقبال البيانات النصية ---
+@dp.message(FormSteps.get_manual_code)
+async def process_manual_code(message: Message, state: FSMContext):
+    code = message.text.strip()
+    code = code if code.startswith('+') else f"+{code}"
+    await state.update_data(country_code=code)
+    await state.set_state(FormSteps.get_phone)
+    await message.answer(f"✅ تم استلام الرمز ({code})\n\n<b>الآن أرسل رقم الهاتف المحلي فقط:</b>")
 
-bot.action(/set_code_(.+)/, async (ctx) => {
-    const code = ctx.match[1];
-    const state = userState[ctx.from.id];
+@dp.message(FormSteps.get_phone)
+async def process_phone(message: Message, state: FSMContext):
+    local_phone = message.text.strip().replace('+', '')
+    await state.update_data(local_phone=local_phone)
+    await state.set_state(FormSteps.get_email)
+    await message.answer("<b>📧 الخطوة 2:</b> أرسل البريد الإلكتروني:")
+
+@dp.message(FormSteps.get_email)
+async def process_email(message: Message, state: FSMContext):
+    email = message.text.strip()
+    if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
+        return await message.answer("⚠️ إيميل غير صحيح، حاول مجدداً:")
+    await state.update_data(email=email)
+    await state.set_state(FormSteps.get_message)
+    await message.answer("<b>📝 الخطوة 3:</b> أرسل نص الرسالة لواتساب:")
+
+@dp.message(FormSteps.get_message)
+async def process_message(message: Message, state: FSMContext):
+    data = await state.get_data()
+    custom_msg = message.text.strip()
+    await state.update_data(custom_message=custom_msg)
     
-    if (!state) return ctx.answerCbQuery('⚠️ الجلسة منتهية، ابدأ من جديد.', { show_alert: true });
-
-    if (code === 'manual') {
-        state.step = 'get_manual_code';
-        await ctx.editMessageText('📝 أرسل رمز الدولة فقط (مثال: +967):');
-    } else {
-        state.countryCode = code;
-        state.step = 'get_phone';
-        await ctx.editMessageText(`✅ تم اختيار الرمز (${code})\n\n<b>الآن أرسل رقم الهاتف المحلي فقط (بدون رمز الدولة):</b>`, { parse_mode: 'HTML' });
-    }
-    await ctx.answerCbQuery();
-});
-
-bot.on('text', async (ctx) => {
-    const state = userState[ctx.from.id];
-    if (!state) return;
-
-    const text = ctx.message.text.trim();
-
-    // تجاهل أزرار الكيبورد الرئيسية
-    if (['🚀 إرسال طلب دعم جديد', '📊 حالة السيرفر', '❌ إلغاء العملية'].includes(text)) return;
-
-    if (state.step === 'get_manual_code') {
-        state.countryCode = text.startsWith('+') ? text : '+' + text;
-        state.step = 'get_phone';
-        await ctx.replyWithHTML(`✅ تم استلام الرمز (${state.countryCode})\n\n<b>الآن أرسل رقم الهاتف المحلي فقط:</b>`);
-    }
-    else if (state.step === 'get_phone') {
-        // تنظيف الرقم من أي إشارات زائدة والاحتفاظ بالرقم المحلي فقط
-        state.localPhone = text.replace('+', '').trim();
-        state.fullPhone = state.countryCode + state.localPhone;
-        state.step = 'get_email';
-        await ctx.replyWithHTML('<b>📧 الخطوة 2:</b> أرسل البريد الإلكتروني:');
-    } 
-    else if (state.step === 'get_email') {
-        if (!isValidEmail(text)) return ctx.reply('⚠️ إيميل غير صحيح، حاول مجدداً:');
-        state.email = text;
-        state.step = 'get_message';
-        await ctx.replyWithHTML('<b>📝 الخطوة 3:</b> أرسل نص الرسالة لواتساب:');
-    }
-    else if (state.step === 'get_message') {
-        state.customMessage = text;
-        state.step = 'confirm';
-        
-        const summary = `<b>👑 مراجعة الطلب النهائي (VIP)</b>\n\n` +
-                        `🌍 <b>رمز الدولة:</b> <code>${state.countryCode}</code>\n` +
-                        `📱 <b>الرقم المحلي:</b> <code>${state.localPhone}</code>\n` +
-                        `📧 <b>الإيميل:</b> <code>${state.email}</code>\n\n` +
-                        `<b>هل تريد التنفيذ الآن؟</b>`;
-        
-        await ctx.replyWithHTML(summary, Markup.inlineKeyboard([
-            [Markup.button.callback('🚀 نعم، أرسل الآن', 'start_task')],
-            [Markup.button.callback('❌ إلغاء', 'cancel_task')]
-        ]));
-    }
-});
-
-bot.action('cancel_task', async (ctx) => {
-    delete userState[ctx.from.id];
-    await ctx.editMessageText('❌ تم إلغاء العملية بنجاح.');
-    await ctx.answerCbQuery();
-});
-
-bot.action('start_task', async (ctx) => {
-    const state = userState[ctx.from.id];
-    if (!state) return ctx.answerCbQuery('⚠️ الجلسة منتهية، ابدأ من جديد.', { show_alert: true });
+    summary = (
+        f"<b>👑 مراجعة الطلب النهائي (VIP - Python)</b>\n\n"
+        f"🌍 <b>رمز الدولة:</b> <code>{data.get('country_code')}</code>\n"
+        f"📱 <b>الرقم المحلي:</b> <code>{data.get('local_phone')}</code>\n"
+        f"📧 <b>الإيميل:</b> <code>{data.get('email')}</code>\n\n"
+        f"<b>هل تريد التنفيذ الآن؟</b>"
+    )
     
-    await ctx.editMessageText('🔄 <b>جاري تشغيل محرك VIP وإرسال الطلب... الرجاء الانتظار قليلاً⏳</b>', { parse_mode: 'HTML' });
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🚀 نعم، أرسل الآن', callback_data='start_task')],
+        [InlineKeyboardButton(text='❌ إلغاء', callback_data='cancel_task')]
+    ])
+    await message.answer(summary, reply_markup=markup)
+    await state.set_state(FormSteps.confirm)
+
+# --- بدء عملية المحرك ---
+@dp.callback_query(F.data == 'start_task')
+async def start_task(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if not data:
+        return await callback.answer("⚠️ الجلسة منتهية، ابدأ من جديد.", show_alert=True)
     
-    // تمرير البيانات المفصلة للمحرك
-    runSupportTask(state.countryCode, state.localPhone, state.email, state.customMessage, ctx);
-    delete userState[ctx.from.id];
-    await ctx.answerCbQuery();
-});
+    await callback.message.edit_text("🔄 <b>جاري تشغيل محرك بايثون وإرسال الطلب... الرجاء الانتظار قليلاً⏳</b>")
+    
+    # تشغيل المتصفح في الخلفية حتى لا يتوقف البوت
+    asyncio.create_task(run_playwright_task(data, callback.message))
+    await state.clear()
+    await callback.answer()
 
-async function runSupportTask(countryCode, localPhone, email, customMsg, ctx) {
-    let browser, context, page;
-    const fullPhone = countryCode + localPhone;
+# --- محرك Playwright المتطور ---
+async def run_playwright_task(data, message_obj):
+    country_code = data['country_code']
+    local_phone = data['local_phone']
+    email = data['email']
+    custom_msg = data['custom_message']
+    full_phone = f"{country_code}{local_phone}"
 
-    try {
-        browser = await getBrowser();
-        context = await browser.createIncognitoBrowserContext();
-        page = await context.newPage();
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+        )
         
-        await page.setRequestInterception(true);
-        page.on('request', (req) => {
-            if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) req.abort();
-            else req.continue();
-        });
+        # إجبار المتصفح على استخدام اللغة الإنجليزية وضبط حجم نافذة مناسب للقطات الشاشة
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            locale="en-US",
+            viewport={'width': 1280, 'height': 900}
+        )
+        page = await context.new_page()
+        await stealth_async(page) # تفعيل التخفي
 
-        const desktopUA = new UserAgent({ deviceCategory: 'desktop' }).toString();
-        await page.setUserAgent(desktopUA);
-        
-        await page.goto('https://www.whatsapp.com/contact/noclient/', { waitUntil: 'networkidle2', timeout: 60000 });
-        
-        await page.waitForSelector('input[name="phone_number"]', { timeout: 30000 });
-        
-        // --- 1. التعامل الذكي مع حقل اختيار الدولة ---
-        await page.evaluate((cCode) => {
-            const cleanCode = cCode.replace('+', '');
-            const selects = Array.from(document.querySelectorAll('select'));
-            const countrySelect = selects.find(s => s.name.includes('country') || s.className.includes('country'));
+        # تم إزالة stylesheet من هنا لكي لا يتشوه التصميم وتختفي العناصر وتسبب Timeout
+        async def intercept(route):
+            if route.request.resource_type in ["image", "font", "media"]:
+                await route.abort()
+            else:
+                await route.continue_()
+        await page.route("**/*", intercept)
+
+        try:
+            # إضافة ?lang=en في الرابط لإجبار واتساب على فتح الصفحة بالإنجليزية
+            await page.goto('https://www.whatsapp.com/contact/noclient/?lang=en', wait_until='networkidle', timeout=60000)
             
-            if (countrySelect) {
-                for (let option of countrySelect.options) {
-                    if (option.value.includes(cleanCode) || option.text.includes(cCode)) {
-                        countrySelect.value = option.value;
-                        countrySelect.dispatchEvent(new Event('change', { bubbles: true }));
-                        break;
-                    }
-                }
-            } else {
-                const inputs = Array.from(document.querySelectorAll('input'));
-                const countryInput = inputs.find(i => i.name.includes('country') || i.name === 'phone_number_country_code');
-                if (countryInput) {
-                    countryInput.value = cleanCode;
-                    countryInput.dispatchEvent(new Event('input', { bubbles: true }));
-                    countryInput.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-            }
-        }, countryCode);
+            # انتظار ظهور الحقل
+            await page.wait_for_selector('input[name="phone_number"]', timeout=30000)
 
-        // --- 2. إدخال الرقم المحلي فقط ---
-        await page.evaluate(() => {
-            const phoneInput = document.querySelector('input[name="phone_number"]');
-            if (phoneInput) phoneInput.value = ''; // تصفير الحقل لضمان عدم الدمج الخاطئ
-        });
-        await page.type('input[name="phone_number"]', localPhone, { delay: randomDelay() });
-        
-        // --- 3. إدخال الإيميل (مع المرونة في المسميات) ---
-        await page.type('input[name="email"], input[type="email"]', email, { delay: randomDelay() });
-        
-        const confirmEmailExists = await page.$('input[name="email_confirm"]');
-        if (confirmEmailExists) {
-            await page.type('input[name="email_confirm"]', email, { delay: randomDelay() });
-        }
+            # تغيير رمز الدولة برمجياً
+            js_code = f"""
+            (cCode) => {{
+                const cleanCode = cCode.replace('+', '');
+                const selects = Array.from(document.querySelectorAll('select'));
+                const countrySelect = selects.find(s => s.name.includes('country') || s.className.includes('country'));
+                if (countrySelect) {{
+                    for (let option of countrySelect.options) {{
+                        if (option.value.includes(cleanCode) || option.text.includes(cCode)) {{
+                            countrySelect.value = option.value;
+                            countrySelect.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            break;
+                        }}
+                    }}
+                }}
+            }}
+            """
+            await page.evaluate(js_code, country_code)
+            await asyncio.sleep(1)
 
-        // --- 4. تحديد نظام Android ---
-        await page.evaluate(() => {
-            const androidRadio = document.querySelector('input[type="radio"][value="android"]') || 
-                                 document.querySelector('input[type="radio"]');
-            if (androidRadio) androidRadio.click();
-        });
-        
-        // --- 5. كتابة الرسالة ---
-        await page.type('#message, textarea[name="message"], textarea', customMsg, { delay: randomDelay(20, 50) });
-        
-        // --- 6. الإرسال ---
-        await page.waitForSelector('button[type="submit"]', { timeout: 15000 });
-        await page.click('button[type="submit"]');
-        
-        await new Promise(r => setTimeout(r, 5000));
-        
-        // تأكيد الإرسال النهائي إن تطلب الأمر
-        const finalSubmit = await page.$('button[type="submit"]');
-        if (finalSubmit) {
-            await page.click('button[type="submit"]');
-            await new Promise(r => setTimeout(r, 3000));
-        }
+            # إدخال البيانات
+            await page.fill('input[name="phone_number"]', "")
+            await page.type('input[name="phone_number"]', local_phone, delay=random.randint(40, 90))
+            
+            await page.type('input[name="email"]', email, delay=random.randint(40, 90))
+            if await page.locator('input[name="email_confirm"]').count() > 0:
+                await page.type('input[name="email_confirm"]', email, delay=random.randint(40, 90))
 
-        await ctx.replyWithHTML(`✅ <b>تم الإرسال بنجاح سيدي!</b>\n\n📱 الرقم المستهدف: <code>${fullPhone}</code>`);
-    } catch (err) {
-        console.error("Task Error:", err);
-        if (page) {
-            const screenshotPath = `error_${Date.now()}.png`;
-            try {
-                await page.screenshot({ path: screenshotPath });
-                await ctx.replyWithPhoto({ source: screenshotPath }, { caption: `❌ فشل الإرسال.\nالخطأ: ${err.message}` });
-                if (fs.existsSync(screenshotPath)) fs.unlinkSync(screenshotPath);
-            } catch (screenshotErr) {
-                await ctx.reply(`❌ فشل الإرسال ولم أتمكن من التقاط صورة.\nالخطأ: ${err.message}`);
-            }
-        } else {
-            await ctx.reply(`❌ فشل الاتصال بالمحرك: ${err.message}`);
-        }
-    } finally {
-        if (page) await page.close().catch(e => console.log(e));
-        if (context) await context.close().catch(e => console.log(e));
-    }
-}
+            await page.evaluate('() => { const r = document.querySelector(\'input[type="radio"][value="android"]\') || document.querySelector(\'input[type="radio"]\'); if(r) r.click(); }')
+            
+            await page.type('#message, textarea[name="message"]', custom_msg, delay=random.randint(20, 50))
+            
+            # الإرسال (البحث عن الزر بناءً على الكلمات الإنجليزية لضمان الدقة)
+            submit_button = page.locator('button[type="submit"], button:has-text("Next Step")').first
+            await submit_button.click()
+            await asyncio.sleep(4)
+            
+            # التأكد من عدم وجود خطوة تأكيد ثانية (Send Question)
+            final_send_button = page.locator('button:has-text("Send Question")').first
+            if await final_send_button.count() > 0 and await final_send_button.is_visible():
+                await final_send_button.click()
+                await asyncio.sleep(4)
 
-// تشغيل البوت وتهيئة المتصفح
-getBrowser().then(() => {
-    bot.launch({ dropPendingUpdates: true });
-    console.log("🤖 بوت التليجرام يعمل الآن.");
-}).catch(err => console.error("❌ فشل تشغيل النظام:", err));
+            # التقاط شاشة كاملة للنجاح
+            success_screenshot = f"success_{random.randint(1000,9999)}.png"
+            await page.screenshot(path=success_screenshot, full_page=True)
+            photo = FSInputFile(success_screenshot)
+            await message_obj.answer_photo(photo, caption=f"✅ <b>تم الإرسال بنجاح سيدي!</b>\n\n📱 الرقم المستهدف: <code>{full_phone}</code>")
+            os.remove(success_screenshot)
 
-// --- الإغلاق الآمن للموارد ---
-process.once('SIGINT', async () => {
-    if (globalBrowser) await globalBrowser.close();
-    bot.stop('SIGINT');
-});
-process.once('SIGTERM', async () => {
-    if (globalBrowser) await globalBrowser.close();
-    bot.stop('SIGTERM');
-});
+        except Exception as e:
+            print(f"Error: {e}")
+            screenshot_path = f"error_{random.randint(1000,9999)}.png"
+            try:
+                # التقاط شاشة كاملة عند الفشل (full_page=True)
+                await page.screenshot(path=screenshot_path, full_page=True)
+                photo = FSInputFile(screenshot_path)
+                await message_obj.answer_photo(photo, caption=f"❌ فشل الإرسال.\nالخطأ التقني: <code>{str(e)[:150]}</code>")
+                os.remove(screenshot_path)
+            except Exception as pic_error:
+                await message_obj.answer(f"❌ فشل الإرسال ولم أتمكن من التقاط صورة.\nالخطأ: {str(e)[:100]}")
+        finally:
+            await browser.close()
+
+# --- خادم الويب الخاص بـ Render ---
+async def web_handler(request):
+    return web.Response(text="🟢 الخادم يعمل والبوت متصل!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', web_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    print(f"🌐 خادم الويب يعمل على المنفذ {PORT}")
+
+# --- نقطة البداية ---
+async def main():
+    await start_web_server()
+    print("🤖 جاري تشغيل بوت التليجرام...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
